@@ -7,7 +7,7 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# Set local Windows Tesseract OCR path if running on laptop
+# Handle Tesseract paths for both Windows local and Linux Cloud
 tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 if os.path.exists(tess_path):
     pytesseract.pytesseract.tesseract_cmd = tess_path
@@ -29,14 +29,12 @@ def load_classical():
 
 @st.cache_resource
 def load_distilbert():
-    # Load directly from your live Hugging Face repository
     model_repo = "cpmashir/dark-pattern-distilbert"
     tokenizer = AutoTokenizer.from_pretrained(model_repo)
     model = AutoModelForSequenceClassification.from_pretrained(model_repo)
     model.eval()
     return tokenizer, model
 
-# Load models
 classical_model, classical_vectorizer = load_classical()
 distil_tokenizer, distil_model = load_distilbert()
 
@@ -63,19 +61,32 @@ def run_inference(text_input):
     st.markdown("---")
     st.subheader("Audit Verdict")
 
+    is_dark_pattern = False
+    confidence = 50.0
+    raw_label = ""
+
     if "LinearSVC" in model_choice:
         # 1. Classical Prediction via TF-IDF
         vec = classical_vectorizer.transform([text_input])
         pred_raw = classical_model.predict(vec)[0]
-        label = "Dark Pattern" if str(pred_raw) in ["1", "Dark Pattern"] else "Not Dark Pattern"
+        raw_label = str(pred_raw).strip()
 
-        # Confidence approximation via decision boundary distance
+        # Decision boundary margin calculation
         if hasattr(classical_model, "decision_function"):
             dec = classical_model.decision_function(vec)
             margin = abs(dec[0]) if dec.ndim == 1 else np.max(dec)
             confidence = float((1 / (1 + np.exp(-margin))) * 100)
         else:
-            confidence = 92.0
+            confidence = 90.0
+
+        # Match safe vs dark labels
+        norm = raw_label.lower()
+        if norm in ["0", "not dark pattern", "not a dark pattern", "safe", "false"]:
+            is_dark_pattern = False
+        elif norm in ["1", "dark pattern", "dark_pattern", "deceptive", "true"]:
+            is_dark_pattern = True
+        else:
+            is_dark_pattern = "dark" in norm
 
     else:
         # 2. Deep Learning Prediction via DistilBERT
@@ -85,7 +96,6 @@ def run_inference(text_input):
             truncation=True, 
             max_length=64
         )
-        # Prevent token_type_ids crash in DistilBERT
         inputs.pop("token_type_ids", None)
 
         with torch.no_grad():
@@ -93,19 +103,33 @@ def run_inference(text_input):
             probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
             pred_idx = torch.argmax(probs, dim=-1).item()
             confidence = float(probs[0][pred_idx].item() * 100)
-            label = distil_model.config.id2label[pred_idx]
 
-    # Render results
-    if str(label).lower() in ["not dark pattern", "not a dark pattern", "0"]:
-        st.success(f"✅ **Safe / Informational Copy** (Class: `{label}`)")
+            # Map index using config id2label or fallback to index
+            if hasattr(distil_model.config, "id2label") and distil_model.config.id2label:
+                raw_label = str(distil_model.config.id2label.get(pred_idx, pred_idx)).strip()
+            else:
+                raw_label = str(pred_idx)
+
+        norm = raw_label.lower()
+        # Colab trained mapping: 0 -> Not Dark Pattern, 1 -> Dark Pattern
+        if norm in ["0", "label_0", "not dark pattern", "not a dark pattern", "safe"]:
+            is_dark_pattern = False
+        elif norm in ["1", "label_1", "dark pattern", "dark_pattern"]:
+            is_dark_pattern = True
+        else:
+            is_dark_pattern = bool(pred_idx == 1)
+
+    # --- RENDER RESULTS ---
+    if not is_dark_pattern:
+        st.success(f"✅ **Safe / Informational Copy** (Class: `Not Dark Pattern`)")
     else:
-        st.error(f"⚠️ **Deceptive Pattern Detected!** (Class: `{label}`)")
+        st.error(f"⚠️ **Deceptive Pattern Detected!** (Class: `Dark Pattern`)")
 
     conf_clamped = min(max(int(confidence), 10), 100)
     st.progress(conf_clamped)
-    st.caption(f"Confidence: **{confidence:.2f}%** | Analyzed by: {model_choice}")
+    st.caption(f"Confidence: **{confidence:.2f}%** | Architecture: **{model_choice}** | Raw Tag: `{raw_label}`")
 
-# TAB 1: Text Copy Input
+# TAB 1: Direct Text Input
 with tab1:
     user_text = st.text_area(
         "Paste website banner or button text:", 
@@ -118,7 +142,7 @@ with tab1:
         else:
             st.warning("Please type or paste some text first.")
 
-# TAB 2: Screenshot OCR Input
+# TAB 2: Image OCR Input
 with tab2:
     img_upload = st.file_uploader(
         "Upload interface screenshot (.png, .jpg, .jpeg)", 
