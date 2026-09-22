@@ -11,6 +11,8 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 if os.path.exists(tess_path):
     pytesseract.pytesseract.tesseract_cmd = tess_path
+elif os.path.exists('/usr/bin/tesseract'):
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 st.set_page_config(
     page_title="Dark Pattern Detector", 
