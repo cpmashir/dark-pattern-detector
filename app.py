@@ -7,7 +7,7 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# Handle Tesseract paths for both Windows local and Linux Cloud
+# Platform-independent Tesseract path
 tess_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 if os.path.exists(tess_path):
     pytesseract.pytesseract.tesseract_cmd = tess_path
@@ -25,7 +25,8 @@ st.set_page_config(
 def load_classical():
     model = joblib.load('best_model.pkl')
     vec = joblib.load('tfidf_vectorizer.pkl')
-    return model, vec
+    cats = joblib.load('categories.pkl')
+    return model, vec, cats
 
 @st.cache_resource
 def load_distilbert():
@@ -35,7 +36,7 @@ def load_distilbert():
     model.eval()
     return tokenizer, model
 
-classical_model, classical_vectorizer = load_classical()
+classical_model, classical_vectorizer, categories = load_classical()
 distil_tokenizer, distil_model = load_distilbert()
 
 # --- SIDEBAR CONTROLS ---
@@ -46,11 +47,9 @@ model_choice = st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("""
-**Model Benchmarks:**
-* **LinearSVC:** Macro F1: `0.9385` (<15ms latency)
-* **DistilBERT:** Macro F1: `0.9745` (Contextual self-attention)
-""")
+st.sidebar.markdown("**Trained Categories (8 Classes):**")
+for cat in categories:
+    st.sidebar.markdown(f"- {cat}")
 
 st.title("🛡️ Deceptive UI & Dark Pattern Detector")
 st.caption(f"Active Engine: **{model_choice}**")
@@ -61,35 +60,25 @@ def run_inference(text_input):
     st.markdown("---")
     st.subheader("Audit Verdict")
 
-    is_dark_pattern = False
-    confidence = 50.0
-    raw_label = ""
+    pred_category = ""
+    confidence = 0.0
 
     if "LinearSVC" in model_choice:
-        # 1. Classical Prediction via TF-IDF
         vec = classical_vectorizer.transform([text_input])
-        pred_raw = classical_model.predict(vec)[0]
-        raw_label = str(pred_raw).strip()
+        pred_idx = int(classical_model.predict(vec)[0])
+        pred_category = categories[pred_idx]
 
-        # Decision boundary margin calculation
+        # Multi-class confidence score via softmax on decision boundaries
         if hasattr(classical_model, "decision_function"):
-            dec = classical_model.decision_function(vec)
-            margin = abs(dec[0]) if dec.ndim == 1 else np.max(dec)
-            confidence = float((1 / (1 + np.exp(-margin))) * 100)
+            decision = classical_model.decision_function(vec)
+            scores = decision[0] if decision.ndim > 1 else decision
+            exp_scores = np.exp(scores - np.max(scores))
+            probs = exp_scores / np.sum(exp_scores)
+            confidence = float(probs[pred_idx] * 100) if decision.ndim > 1 else 92.0
         else:
             confidence = 90.0
 
-        # Match safe vs dark labels
-        norm = raw_label.lower()
-        if norm in ["0", "not dark pattern", "not a dark pattern", "safe", "false"]:
-            is_dark_pattern = False
-        elif norm in ["1", "dark pattern", "dark_pattern", "deceptive", "true"]:
-            is_dark_pattern = True
-        else:
-            is_dark_pattern = "dark" in norm
-
     else:
-        # 2. Deep Learning Prediction via DistilBERT
         inputs = distil_tokenizer(
             text_input, 
             return_tensors="pt", 
@@ -104,30 +93,22 @@ def run_inference(text_input):
             pred_idx = torch.argmax(probs, dim=-1).item()
             confidence = float(probs[0][pred_idx].item() * 100)
 
-            # Map index using config id2label or fallback to index
             if hasattr(distil_model.config, "id2label") and distil_model.config.id2label:
-                raw_label = str(distil_model.config.id2label.get(pred_idx, pred_idx)).strip()
+                pred_category = str(distil_model.config.id2label.get(pred_idx, pred_idx))
             else:
-                raw_label = str(pred_idx)
-
-        norm = raw_label.lower()
-        # Colab trained mapping: 0 -> Not Dark Pattern, 1 -> Dark Pattern
-        if norm in ["0", "label_0", "not dark pattern", "not a dark pattern", "safe"]:
-            is_dark_pattern = False
-        elif norm in ["1", "label_1", "dark pattern", "dark_pattern"]:
-            is_dark_pattern = True
-        else:
-            is_dark_pattern = bool(pred_idx == 1)
+                pred_category = categories[pred_idx]
 
     # --- RENDER RESULTS ---
-    if not is_dark_pattern:
-        st.success(f"✅ **Safe / Informational Copy** (Class: `Not Dark Pattern`)")
+    if pred_category.strip().lower() in ["not dark pattern", "safe"]:
+        st.success(f"✅ **Safe / Informational Copy**")
+        st.info(f"**Classification:** `{pred_category}`")
     else:
-        st.error(f"⚠️ **Deceptive Pattern Detected!** (Class: `Dark Pattern`)")
+        st.error(f"⚠️ **Deceptive Pattern Detected!**")
+        st.markdown(f"**Identified Category:** `{pred_category}`")
 
     conf_clamped = min(max(int(confidence), 10), 100)
     st.progress(conf_clamped)
-    st.caption(f"Confidence: **{confidence:.2f}%** | Architecture: **{model_choice}** | Raw Tag: `{raw_label}`")
+    st.caption(f"Confidence: **{confidence:.2f}%** | Architecture: **{model_choice}**")
 
 # TAB 1: Direct Text Input
 with tab1:
@@ -136,7 +117,7 @@ with tab1:
         height=100,
         placeholder="e.g. Hurry! Only 2 items left at this price!"
     )
-    if st.button("Audit Text", key="btn_text", width="stretch"):
+    if st.button("Audit Text", key="btn_text", use_container_width=True):
         if user_text.strip():
             run_inference(user_text)
         else:
@@ -151,9 +132,9 @@ with tab2:
     if img_upload:
         image = Image.open(img_upload)
         image.thumbnail((800, 800))
-        st.image(image, caption="Uploaded Interface Sample", width="stretch")
+        st.image(image, caption="Uploaded Interface Sample", use_container_width=True)
 
-        if st.button("Extract Text & Audit", key="btn_ocr", width="stretch"):
+        if st.button("Extract Text & Audit", key="btn_ocr", use_container_width=True):
             with st.spinner("Extracting text via Tesseract OCR..."):
                 try:
                     extracted = pytesseract.image_to_string(image).strip()
